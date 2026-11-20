@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "timereport-mcp"
+version = "0.1.0"
+description = "Phase 1 TimeReport MCP server for tenant-scoped Excel timesheets and on-demand SMS"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "VectorSynapse" }]
+dependencies = [
+  "mcp>=2.3.0,<3",
+  "pydantic>=2.7,<3",
+  "pydantic-settings>=2.4,<3",
+  "openpyxl>=3.1,<4",
+  "sqlalchemy>=2.0,<3",
+  "alembic>=1.13,<2",
+  "httpx>=0.27,<1",
+  "phonenumbers>=8.13,<10",
+  "filelock>=3.15,<4",
+  "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.8,<1",
+  "pyright>=1.1,<2",
+]
+postgres = [
+  "psycopg[binary]>=3.2,<4",
+]
+
+[project.scripts]
+timereport-mcp = "timereport_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/timereport_mcp"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/timereport_mcp" = "timereport_mcp"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM108", "SIM102", "SIM210"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["tests", "scripts", ".venv"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

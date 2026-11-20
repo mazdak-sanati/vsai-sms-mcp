@@ -1,0 +1,7 @@
+calendar_id = "synthetic_2026"
+# Invented holiday dates for tests only — not a legal Swedish calendar.
+dates = [
+  "2026-01-01",
+  "2026-06-06",
+  "2026-12-25",
+]

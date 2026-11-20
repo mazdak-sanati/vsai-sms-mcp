@@ -1,0 +1,102 @@
+# Synthetic multi-tenant example. Paths stay under workbook_roots.
+# Token values (never commit production tokens):
+#   tenant-a-token-synthetic
+#   tenant-b-token-synthetic
+
+calendars = [
+  "calendars/synthetic_2026.toml",
+]
+
+[[tenants]]
+tenant_id = "tenant-a"
+label = "Synthetic Tenant A"
+region = "SE"
+timezone = "Europe/Stockholm"
+workbook_roots = ["../tests/fixtures/tenant-a"]
+max_sends_per_tenant_per_local_day = 50
+full_time_profile = "se_full_time_40"
+
+[tenants.holiday]
+mode = "none_confirmed"
+range_start = "2026-01-01"
+range_end = "2026-12-31"
+
+[[tenants.workbooks]]
+workbook_id = "tenant-a-timesheet"
+label = "Tenant A timesheet"
+path = "../tests/fixtures/tenant-a/timesheet.xlsx"
+sheet = "Timesheet"
+
+[tenants.workbooks.columns]
+employee_name = "employee_name"
+telephone = "telephone"
+date = "date"
+hours = "hours"
+employee_id = "employee_id"
+
+[[tenants.employees]]
+employee_id = "synthetic-employee-a1"
+classification = "full_time"
+
+[[tenants.templates]]
+template_id = "timesheet_reminder"
+body = "Reminder: please complete your timesheet for {period}."
+
+[[tenants]]
+tenant_id = "tenant-b"
+label = "Synthetic Tenant B"
+region = "SE"
+timezone = "Europe/Stockholm"
+workbook_roots = ["../tests/fixtures/tenant-b"]
+max_sends_per_tenant_per_local_day = 50
+full_time_profile = "se_full_time_40"
+
+[tenants.holiday]
+mode = "calendar"
+calendar_id = "synthetic_2026"
+
+[[tenants.workbooks]]
+workbook_id = "tenant-b-timesheet"
+label = "Tenant B timesheet"
+path = "../tests/fixtures/tenant-b/timesheet.xlsx"
+sheet = "Timesheet"
+
+[tenants.workbooks.columns]
+employee_name = "employee_name"
+telephone = "telephone"
+date = "date"
+hours = "hours"
+
+[[tenants.employees]]
+employee_id = "synthetic-person-b"
+classification = "full_time"
+
+[[tenants.templates]]
+template_id = "timesheet_reminder"
+body = "Reminder: please complete your timesheet for {period}."
+
+[[clients]]
+client_id = "client-tenant-a"
+tenant_id = "tenant-a"
+token_sha256 = "1579da68469fe79fcb0b983ae2f9457ca49df8f0bb8f2e691f54004c57cff506"
+scopes = [
+  "workbooks:read",
+  "workbooks:write",
+  "sms:read",
+  "sms:send",
+  "sms:admin",
+]
+synthetic_example = true
+
+[[clients]]
+client_id = "client-tenant-b"
+tenant_id = "tenant-b"
+token_sha256 = "474cd4f2e61cc44a6a4bdda2b110e475c4d2f196b09a5d3a1e6f1d8c97358dde"
+scopes = [
+  "workbooks:read",
+  "workbooks:write",
+  "sms:read",
+  "sms:send",
+  "sms:admin",
+]
+synthetic_example = true
