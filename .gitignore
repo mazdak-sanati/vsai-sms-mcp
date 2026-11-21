@@ -9,6 +9,8 @@ build/
 .venv/
 venv/
 .env
+tests/local_test.env
+**/local_test.env
 .python-version
 
 # Tooling

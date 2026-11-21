@@ -5,12 +5,22 @@
 | Field | Value |
 |---|---|
 | Phase | Phase 1 implementation |
-| Milestone | M8 complete |
-| State | Phase 1 deliverables implemented; suite green |
-| Next action | Optional review / commit; ready for Phase 2 client integration against `docs/mcp_api.md` |
-| Blockers | None |
+| Milestone | M8 complete + agent-facing docs refresh |
+| State | Suite green; `docs/mcp_api.md` is the primary client/agent guide |
+| Next action | Phase 2 agents should follow `docs/mcp_api.md`; optional commit of doc updates |
+| Blockers | None. Product discussion open: simplify `send_sms` to remove daily claim gating (not implemented yet). |
 
 ## Chronology
+
+### 2026-11-21 Europe/Stockholm — Agent/client documentation refresh
+
+- **Milestone:** Documentation for connecting agents (no SMS semantics code change).
+- **Changes:**
+  - Rewrote `docs/mcp_api.md` as full client/agent usage guide (connect, workflows, schemas, SMS replay).
+  - Updated `docs/mcp_interface.md`, `docs/README.md`, `docs/handoff.md`, root `README.md`.
+  - Expanded MCP server `instructions` and per-tool docstrings in `src/timereport_mcp/server.py` so hosts that only read MCP metadata still get usage rules.
+- **Tests:** Not re-run for docs-only intent; no behavioral change intended beyond instruction text.
+- **Next step:** Optional commit; implement simplified `send_sms` only after explicit approval.
 
 ### 2026-11-19 22:10 Europe/Stockholm — Implementation M0–M8 complete
 

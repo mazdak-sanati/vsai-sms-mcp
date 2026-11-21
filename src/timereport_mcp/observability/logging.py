@@ -7,7 +7,9 @@ import re
 import sys
 from typing import Any
 
-_PHONE_RE = re.compile(r"\+?\d[\d\s\-()]{6,}\d")
+# Require a phone-like token (optional +, then 8+ digits with optional separators).
+# Avoid matching hex message ids such as ...fa27151648c4.
+_PHONE_RE = re.compile(r"(?<![A-Za-z0-9])\+?\d(?:[\d\s\-()]{6,}\d)(?![A-Za-z0-9])")
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+")
 _PASSWORD_KEYS = frozenset(
     {

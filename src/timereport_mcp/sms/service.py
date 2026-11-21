@@ -1,4 +1,8 @@
-"""On-demand SMS send with durable daily idempotency."""
+"""On-demand SMS send with durable daily idempotency.
+
+Destination and message body are supplied by the caller (agent). This module
+does not read workbooks or server-side SMS templates for send content.
+"""
 
 from __future__ import annotations
 
@@ -11,13 +15,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from timereport_mcp.auth.principals import Principal
 from timereport_mcp.config import AppConfig
-from timereport_mcp.excel.reader import read_timesheet
 from timereport_mcp.excel.service import validate_period
-from timereport_mcp.excel.workbooks import resolve_workbook
 from timereport_mcp.models import ToolResult
 from timereport_mcp.persistence.models import SmsClaim, SmsSuppression
 from timereport_mcp.sms.gateway import SmsGateway, SmsSendRequest
 from timereport_mcp.sms.phone import normalize_e164, telephone_hash
+
+# Stored on claims for schema compatibility; content is caller-provided.
+CALLER_PROVIDED_TEMPLATE_ID = "caller_provided"
+_MAX_MESSAGE_CHARS = 480
 
 
 def _local_today(tz_name: str, clock: date | None = None) -> date:
@@ -26,8 +32,14 @@ def _local_today(tz_name: str, clock: date | None = None) -> date:
     return datetime.now(ZoneInfo(tz_name)).date()
 
 
-def _claim_payload(claim: SmsClaim, *, replayed: bool = False) -> dict:
-    return {
+def _claim_payload(
+    claim: SmsClaim,
+    *,
+    replayed: bool = False,
+    provider_detail: str | None = None,
+    destination_last4: str | None = None,
+) -> dict:
+    payload = {
         "tenant_id": claim.tenant_id,
         "employee_id": claim.employee_id,
         "period": claim.period,
@@ -38,6 +50,11 @@ def _claim_payload(claim: SmsClaim, *, replayed: bool = False) -> dict:
         "provider_message_id": claim.provider_message_id,
         "replayed": replayed,
     }
+    if provider_detail:
+        payload["provider_detail"] = provider_detail
+    if destination_last4:
+        payload["destination_last4"] = destination_last4
+    return payload
 
 
 def get_sms_status(
@@ -146,39 +163,34 @@ def send_sms(
     gateway: SmsGateway,
     principal: Principal,
     *,
-    workbook_id: str,
+    to: str,
+    message: str,
     employee_id: str,
     period: str,
-    template_id: str,
     clock: date | None = None,
 ) -> ToolResult:
+    """Send an SMS using caller-provided destination and body.
+
+    employee_id + period are used only for suppression and same-day idempotency.
+    """
     period_err = validate_period(period)
     if period_err is not None:
         return period_err
 
-    workbook, err = resolve_workbook(config, principal, workbook_id)
-    if err is not None:
-        return err
-    assert workbook is not None
+    if not employee_id or not str(employee_id).strip():
+        return ToolResult.failure("validation_error", "employee_id is required")
+
+    body = (message or "").strip()
+    if not body:
+        return ToolResult.failure("validation_error", "message is required")
+    if len(body) > _MAX_MESSAGE_CHARS:
+        return ToolResult.failure(
+            "validation_error",
+            f"message exceeds {_MAX_MESSAGE_CHARS} characters",
+        )
 
     tenant = config.tenants[principal.tenant_id]
-    template = next((t for t in tenant.templates if t.template_id == template_id), None)
-    if template is None:
-        return ToolResult.failure("not_found", "Template not found.")
-
-    # Resolve employee telephone from workbook (authorized read).
-    read = read_timesheet(workbook, period=period)
-    if read.error_code:
-        return ToolResult.failure(read.error_code, read.error_message or "Workbook error")
-    employee_entries = [e for e in read.entries if e.employee_id == employee_id]
-    if not employee_entries:
-        # Fall back to any row for this employee outside the period filter.
-        full = read_timesheet(workbook)
-        employee_entries = [e for e in full.entries if e.employee_id == employee_id]
-    if not employee_entries:
-        return ToolResult.failure("not_found", "Employee not found in workbook.")
-    raw_phone = employee_entries[0].telephone
-    e164 = normalize_e164(raw_phone, region=tenant.region)
+    e164 = normalize_e164(to, region=tenant.region)
     if e164 is None:
         return ToolResult.failure(
             "sms_not_eligible",
@@ -186,7 +198,6 @@ def send_sms(
         )
 
     local_day = _local_today(tenant.timezone, clock)
-    body = template.body.replace("{period}", period)
     now = datetime.now(UTC)
 
     # Suppression check before claim insert.
@@ -237,7 +248,7 @@ def send_sms(
             employee_id=employee_id,
             period=period,
             local_date=local_day,
-            template_id=template_id,
+            template_id=CALLER_PROVIDED_TEMPLATE_ID,
             state="pending",
             provider=config.settings.sms.provider,
             provider_message_id=None,
@@ -263,6 +274,7 @@ def send_sms(
 
         claim_id = claim.id
 
+    destination_last4 = "".join(ch for ch in e164 if ch.isdigit())[-4:]
     # Provider call outside the insert transaction; claim already durable as pending.
     result = gateway.send(
         SmsSendRequest(
@@ -277,9 +289,22 @@ def send_sms(
         assert claim is not None
         if claim.state != "pending":
             # Another path already finalized; treat as replay.
-            return ToolResult.success(_claim_payload(claim, replayed=True))
+            return ToolResult.success(
+                _claim_payload(
+                    claim,
+                    replayed=True,
+                    destination_last4=destination_last4,
+                )
+            )
         claim.state = result.outcome
         claim.provider_message_id = result.provider_message_id
         claim.updated_at = datetime.now(UTC)
         session.commit()
-        return ToolResult.success(_claim_payload(claim, replayed=False))
+        return ToolResult.success(
+            _claim_payload(
+                claim,
+                replayed=False,
+                provider_detail=result.detail,
+                destination_last4=destination_last4,
+            )
+        )

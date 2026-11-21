@@ -32,6 +32,7 @@ These are not part of the approved milestone list until a later plan revision sa
 
 | Priority | Improvement | Classification |
 |---|---|---|
+| P0 | Simplify `send_sms` to a pass-through send (no daily claim blocking); agent decides send policy; credentials remain env-only | Phase 1 product change — needs plan revision + approval before code change |
 | P2 | PostgreSQL CI job when `TEST_DATABASE_URL` is set | Phase 1 later. Acceptance uses SQLite. |
 | P2 | Evaluate workbook formulas | Phase 1 later. `openpyxl` does not evaluate; formula hours are errors. |
 | P2 | Tool to restore a workbook from a server backup | Phase 1 later. Recovery is an operator file copy. |

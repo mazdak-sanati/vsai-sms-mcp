@@ -10,7 +10,6 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from tests.fixtures.workbook_factory import october_full_rows, write_timesheet
 from timereport_mcp.config import load_config
 from timereport_mcp.observability.logging import RedactingFilter, configure_logging
 from timereport_mcp.persistence.models import SmsClaim
@@ -21,8 +20,10 @@ from timereport_mcp.sms.service import get_sms_status, send_sms, set_sms_suppres
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = ROOT / "config" / "tenants.example.toml"
 TOKEN_A = "tenant-a-token-synthetic"
-FIXTURE = ROOT / "tests" / "fixtures" / "tenant-a" / "timesheet.xlsx"
 CLOCK = date(2026, 10, 15)
+PHONE_A1 = "+46700000001"
+PHONE_A2 = "+46700000002"
+MSG = "Hej! Det saknas 8 timmar i din tidrapport för 2026-10. /tenant-a"
 
 
 def _env(db_name: str) -> dict[str, str]:
@@ -42,7 +43,6 @@ def _env(db_name: str) -> dict[str, str]:
 
 
 def _setup(db_name: str):
-    write_timesheet(FIXTURE, october_full_rows())
     config = load_config(EXAMPLE_CONFIG, environ=_env(db_name))
     gateway = MockSmsGateway()
     runtime = build_runtime(config, gateway=gateway)
@@ -51,69 +51,56 @@ def _setup(db_name: str):
     return config, runtime, gateway, principal
 
 
-def test_first_send_records_one_delivery() -> None:
-    config, runtime, gateway, principal = _setup("test-m6-first")
-    result = send_sms(
+def _send(
+    config,
+    runtime,
+    gateway,
+    principal,
+    *,
+    employee_id: str = "synthetic-employee-a1",
+    to: str = PHONE_A1,
+    message: str = MSG,
+    period: str = "2026-10",
+    clock: date = CLOCK,
+):
+    return send_sms(
         config,
         runtime.session_factory,
         gateway,
         principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
+        to=to,
+        message=message,
+        employee_id=employee_id,
+        period=period,
+        clock=clock,
     )
+
+
+def test_first_send_records_one_delivery() -> None:
+    config, runtime, gateway, principal = _setup("test-m6-first")
+    result = _send(config, runtime, gateway, principal)
     assert result.ok is True
     assert result.data is not None
     assert result.data["state"] == "sent"
     assert result.data["replayed"] is False
+    assert result.data["destination_last4"] == "0001"
     assert len(gateway.sent) == 1
+    assert gateway.sent[0].to_e164 == PHONE_A1
+    assert gateway.sent[0].body == MSG
 
 
 def test_repeat_and_concurrent_do_not_double_send() -> None:
     config, runtime, gateway, principal = _setup("test-m6-repeat")
-    first = send_sms(
-        config,
-        runtime.session_factory,
-        gateway,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    first = _send(config, runtime, gateway, principal)
     assert first.ok and first.data and first.data["state"] == "sent"
-    second = send_sms(
-        config,
-        runtime.session_factory,
-        gateway,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    second = _send(config, runtime, gateway, principal)
     assert second.ok and second.data and second.data["replayed"] is True
     assert len(gateway.sent) == 1
 
-    # Concurrent after reset of gateway counter but same DB — use fresh gateway sharing DB.
     gateway2 = MockSmsGateway()
 
     def attempt():
-        return send_sms(
-            config,
-            runtime.session_factory,
-            gateway2,
-            principal,
-            workbook_id="tenant-a-timesheet",
-            employee_id="synthetic-employee-a1",
-            period="2026-10",
-            template_id="timesheet_reminder",
-            clock=CLOCK,
-        )
+        return _send(config, runtime, gateway2, principal)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda _: attempt(), range(4)))
@@ -121,41 +108,19 @@ def test_repeat_and_concurrent_do_not_double_send() -> None:
     assert len(gateway2.sent) == 0
 
 
-def test_new_process_same_db_no_second_delivery(tmp_path: Path) -> None:
-    write_timesheet(FIXTURE, october_full_rows())
+def test_new_process_same_db_no_second_delivery() -> None:
     env = _env("test-m6-persist")
     config = load_config(EXAMPLE_CONFIG, environ=env)
     gateway = MockSmsGateway()
     runtime = build_runtime(config, gateway=gateway)
     principal = config.clients.resolve_token(TOKEN_A)
     assert principal is not None
-    send_sms(
-        config,
-        runtime.session_factory,
-        gateway,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    _send(config, runtime, gateway, principal)
     assert len(gateway.sent) == 1
 
-    # New runtime / gateway, same DATABASE_URL
     gateway2 = MockSmsGateway()
     runtime2 = build_runtime(config, gateway=gateway2)
-    result = send_sms(
-        config,
-        runtime2.session_factory,
-        gateway2,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    result = _send(config, runtime2, gateway2, principal)
     assert result.data is not None
     assert result.data["replayed"] is True
     assert len(gateway2.sent) == 0
@@ -170,7 +135,7 @@ def test_pending_row_does_not_call_provider() -> None:
                 employee_id="synthetic-employee-a1",
                 period="2026-10",
                 local_date=CLOCK,
-                template_id="timesheet_reminder",
+                template_id="caller_provided",
                 state="pending",
                 provider="mock",
                 created_at=datetime.now(UTC),
@@ -178,17 +143,7 @@ def test_pending_row_does_not_call_provider() -> None:
             )
         )
         session.commit()
-    result = send_sms(
-        config,
-        runtime.session_factory,
-        gateway,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    result = _send(config, runtime, gateway, principal)
     assert result.data is not None
     assert result.data["state"] == "pending"
     assert result.data["replayed"] is True
@@ -196,68 +151,26 @@ def test_pending_row_does_not_call_provider() -> None:
 
 
 def test_timeout_and_rejected_paths() -> None:
-    write_timesheet(FIXTURE, october_full_rows())
     config = load_config(EXAMPLE_CONFIG, environ=_env("test-m6-fail"))
     principal = config.clients.resolve_token(TOKEN_A)
     assert principal is not None
 
     timeout_gw = MockSmsGateway(failure_mode="timeout")
     rt = build_runtime(config, gateway=timeout_gw)
-    r1 = send_sms(
-        config,
-        rt.session_factory,
-        timeout_gw,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    r1 = _send(config, rt, timeout_gw, principal)
     assert r1.data is not None
     assert r1.data["state"] == "uncertain"
-    r1b = send_sms(
-        config,
-        rt.session_factory,
-        timeout_gw,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    r1b = _send(config, rt, timeout_gw, principal)
     assert r1b.data is not None
     assert r1b.data["state"] == "uncertain"
     assert r1b.data["replayed"] is True
 
-    # Separate day/employee for rejected path — use different clock day.
     reject_gw = MockSmsGateway(failure_mode="http_400")
     day2 = date(2026, 10, 16)
-    r2 = send_sms(
-        config,
-        rt.session_factory,
-        reject_gw,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=day2,
-    )
+    r2 = _send(config, rt, reject_gw, principal, clock=day2)
     assert r2.data is not None
     assert r2.data["state"] == "rejected"
-    r2b = send_sms(
-        config,
-        rt.session_factory,
-        reject_gw,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=day2,
-    )
+    r2b = _send(config, rt, reject_gw, principal, clock=day2)
     assert r2b.data is not None
     assert r2b.data["state"] == "rejected"
     assert r2b.data["replayed"] is True
@@ -273,17 +186,7 @@ def test_suppression_opt_out_and_admin() -> None:
         reason="opt_out",
         active=True,
     )
-    blocked = send_sms(
-        config,
-        runtime.session_factory,
-        gateway,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    blocked = _send(config, runtime, gateway, principal)
     assert blocked.ok is False
     assert blocked.error is not None
     assert blocked.error.code == "sms_suppressed"
@@ -299,7 +202,6 @@ def test_suppression_opt_out_and_admin() -> None:
     )
     assert clear.ok is False
 
-    # Admin suppression on another employee id path — use same employee after wiping via new db.
     config2 = load_config(EXAMPLE_CONFIG, environ=_env("test-m6-admin"))
     gw2 = MockSmsGateway()
     rt2 = build_runtime(config2, gateway=gw2)
@@ -311,17 +213,7 @@ def test_suppression_opt_out_and_admin() -> None:
         reason="admin",
         active=True,
     )
-    blocked2 = send_sms(
-        config2,
-        rt2.session_factory,
-        gw2,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    blocked2 = _send(config2, rt2, gw2, principal)
     assert blocked2.error is not None
     assert blocked2.error.code == "sms_suppressed"
     set_sms_suppression(
@@ -332,28 +224,15 @@ def test_suppression_opt_out_and_admin() -> None:
         reason="admin",
         active=False,
     )
-    ok = send_sms(
-        config2,
-        rt2.session_factory,
-        gw2,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    ok = _send(config2, rt2, gw2, principal)
     assert ok.ok is True
     assert len(gw2.sent) == 1
 
 
-def test_budget_cap_and_bad_phone_and_second_template() -> None:
-    write_timesheet(FIXTURE, october_full_rows())
-    # Tiny budget via temporary config mutation after load.
-    config = load_config(EXAMPLE_CONFIG, environ=_env("test-m6-budget"))
-    # Replace tenant max sends
+def test_budget_cap_and_bad_phone_and_message_validation() -> None:
     from dataclasses import replace
 
+    config = load_config(EXAMPLE_CONFIG, environ=_env("test-m6-budget"))
     tenant = config.tenants["tenant-a"]
     config.tenants["tenant-a"] = replace(tenant, max_sends_per_tenant_per_local_day=1)
     gateway = MockSmsGateway()
@@ -361,39 +240,15 @@ def test_budget_cap_and_bad_phone_and_second_template() -> None:
     principal = config.clients.resolve_token(TOKEN_A)
     assert principal is not None
 
-    # Need a second employee in the workbook for budget test.
-    rows = october_full_rows()
-    rows.extend(
-        october_full_rows(
-            employee_id="synthetic-employee-a2",
-            name="Synthetic Person A2",
-            phone="+46700000002",
-        )
-    )
-    write_timesheet(FIXTURE, rows)
-
-    first = send_sms(
-        config,
-        runtime.session_factory,
-        gateway,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    first = _send(config, runtime, gateway, principal)
     assert first.ok is True
-    second = send_sms(
+    second = _send(
         config,
-        runtime.session_factory,
+        runtime,
         gateway,
         principal,
-        workbook_id="tenant-a-timesheet",
         employee_id="synthetic-employee-a2",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
+        to=PHONE_A2,
     )
     assert second.ok is False
     assert second.error is not None
@@ -406,76 +261,42 @@ def test_budget_cap_and_bad_phone_and_second_template() -> None:
         )
         assert count == 0
 
-    # Bad phone
-    write_timesheet(
-        FIXTURE,
-        [
-            {
-                "employee_id": "bad-phone",
-                "employee_name": "Bad Phone",
-                "telephone": "not-a-number",
-                "date": date(2026, 10, 1),
-                "hours": 8,
-            }
-        ],
-    )
     config3 = load_config(EXAMPLE_CONFIG, environ=_env("test-m6-phone"))
     gw3 = MockSmsGateway()
     rt3 = build_runtime(config3, gateway=gw3)
-    bad = send_sms(
+    bad = _send(
         config3,
-        rt3.session_factory,
+        rt3,
         gw3,
         principal,
-        workbook_id="tenant-a-timesheet",
         employee_id="bad-phone",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
+        to="not-a-number",
     )
     assert bad.ok is False
     assert bad.error is not None
     assert bad.error.code == "sms_not_eligible"
 
-    # Second template same day replays first claim
-    write_timesheet(FIXTURE, october_full_rows())
-    config4 = load_config(EXAMPLE_CONFIG, environ=_env("test-m6-tmpl"))
-    # Add a second template by replace
-    from timereport_mcp.config import SmsTemplate
-
-    t = config4.tenants["tenant-a"]
-    config4.tenants["tenant-a"] = replace(
-        t,
-        templates=t.templates
-        + (SmsTemplate(template_id="other", body="Other reminder for {period}."),),
+    empty = _send(
+        config3,
+        rt3,
+        gw3,
+        principal,
+        employee_id="empty-msg",
+        message="   ",
+        clock=date(2026, 10, 17),
     )
+    assert empty.ok is False
+    assert empty.error is not None
+    assert empty.error.code == "validation_error"
+
+    # Same employee/period/day with a different message still replays first claim.
+    config4 = load_config(EXAMPLE_CONFIG, environ=_env("test-m6-msg-replay"))
     gw4 = MockSmsGateway()
     rt4 = build_runtime(config4, gateway=gw4)
-    a = send_sms(
-        config4,
-        rt4.session_factory,
-        gw4,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
-    b = send_sms(
-        config4,
-        rt4.session_factory,
-        gw4,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="other",
-        clock=CLOCK,
-    )
+    a = _send(config4, rt4, gw4, principal, message=MSG)
+    b = _send(config4, rt4, gw4, principal, message="Other reminder body.")
     assert a.data is not None and b.data is not None
     assert b.data["replayed"] is True
-    assert b.data["template_id"] == "timesheet_reminder"
     assert len(gw4.sent) == 1
 
 
@@ -501,17 +322,7 @@ def test_default_provider_is_mock() -> None:
 
 def test_get_sms_status_roundtrip() -> None:
     config, runtime, gateway, principal = _setup("test-m6-status")
-    send_sms(
-        config,
-        runtime.session_factory,
-        gateway,
-        principal,
-        workbook_id="tenant-a-timesheet",
-        employee_id="synthetic-employee-a1",
-        period="2026-10",
-        template_id="timesheet_reminder",
-        clock=CLOCK,
-    )
+    _send(config, runtime, gateway, principal)
     status = get_sms_status(
         config,
         runtime.session_factory,

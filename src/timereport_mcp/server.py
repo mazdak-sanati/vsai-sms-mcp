@@ -63,8 +63,24 @@ def create_server(
     kwargs: dict[str, Any] = {
         "name": "timereport-mcp",
         "instructions": (
-            "TimeReport MCP server for tenant-scoped Excel timesheets and on-demand SMS. "
-            "Tenant identity comes from the authenticated connection, not tool arguments."
+            "TimeReport MCP server: tenant-scoped Excel timesheets and on-demand SMS tools. "
+            "You are a client of this server; you decide when to call tools. "
+            "This server never schedules checks or sends SMS by itself.\n\n"
+            "Identity: tenant and scopes come from the connection "
+            "(HTTP Bearer token or stdio TIMEREPORT_STDIO_TENANT). "
+            "Never pass tenant_id, filesystem paths, SMS passwords, or LLM keys as tool arguments.\n\n"
+            "Typical flow: list_workbooks → get_reporting_status(period=YYYY-MM). "
+            "Completion is only from get_reporting_status (Excel + policy), never from SMS replies.\n\n"
+            "Writes: call inspect_timesheet or read first, then update_timesheet_entry with "
+            "expected_version equal to the returned version.\n\n"
+            "SMS: send_sms requires caller-provided to (E.164) and message body. "
+            "This server does not choose recipients or compose reminder text. "
+            "employee_id + period are for suppression and same-day idempotency only. "
+            "At most one automated send per employee/period/local calendar day; "
+            "a repeat returns ok with replayed=true and does not send again. "
+            "Check get_sms_status or suppression errors before retrying.\n\n"
+            "All tools return JSON {ok, data, error}. Check ok before using data. "
+            "Full reference: docs/mcp_api.md in the server repository."
         ),
     }
     if enable_http_auth:
@@ -82,7 +98,10 @@ def create_server(
 
     @mcp.tool()
     def list_workbooks() -> dict[str, Any]:
-        """Return workbook identifiers and column metadata for the caller's tenant."""
+        """List opaque workbook_id values and column mappings for this tenant.
+
+        Call this first. Do not guess paths. Response envelope: {ok, data, error}.
+        """
         principal, err = require_principal(config.clients, scope="workbooks:read")
         if err is not None:
             return err.model_dump(mode="json")
@@ -91,7 +110,10 @@ def create_server(
 
     @mcp.tool()
     def inspect_timesheet(workbook_id: str) -> dict[str, Any]:
-        """Validate workbook columns/types and summarize record quality."""
+        """Validate timesheet schema and return quality summary plus content version.
+
+        workbook_id: from list_workbooks. Use returned version before update_timesheet_entry.
+        """
         principal, err = require_principal(config.clients, scope="workbooks:read")
         if err is not None:
             return err.model_dump(mode="json")
@@ -100,7 +122,11 @@ def create_server(
 
     @mcp.tool()
     def read_timesheet_entries(workbook_id: str, period: str) -> dict[str, Any]:
-        """Return authorized timesheet entries for a YYYY-MM period."""
+        """Read timesheet rows for one calendar month.
+
+        workbook_id: from list_workbooks.
+        period: YYYY-MM (example 2026-10).
+        """
         principal, err = require_principal(config.clients, scope="workbooks:read")
         if err is not None:
             return err.model_dump(mode="json")
@@ -115,7 +141,12 @@ def create_server(
         period: str,
         employee_id: str | None = None,
     ) -> dict[str, Any]:
-        """Calculate expected vs reported hours for a period."""
+        """Compare expected vs reported hours for a period.
+
+        period: YYYY-MM. Optional employee_id limits to one person.
+        status values: complete, incomplete, policy_review_required, data_review_required.
+        Use this to decide who is incomplete; do not infer completion from SMS replies.
+        """
         principal, err = require_principal(config.clients, scope="workbooks:read")
         if err is not None:
             return err.model_dump(mode="json")
@@ -133,7 +164,12 @@ def create_server(
         expected_version: str,
         create_if_missing: bool = False,
     ) -> dict[str, Any]:
-        """Update one permitted hours cell with version precondition."""
+        """Update one employee's hours for one date with optimistic concurrency.
+
+        date: YYYY-MM-DD. hours: 0-24 with at most two decimals.
+        expected_version: SHA-256 from inspect_timesheet or read_timesheet_entries.
+        On version_conflict, re-read and retry with the new version.
+        """
         principal, err = require_principal(config.clients, scope="workbooks:write")
         if err is not None:
             return err.model_dump(mode="json")
@@ -164,7 +200,11 @@ def create_server(
         period: str,
         local_date: str | None = None,
     ) -> dict[str, Any]:
-        """Query send, suppression, and claim state for an employee/period."""
+        """Return SMS claim and suppression state for an employee and period.
+
+        period: YYYY-MM. local_date: optional YYYY-MM-DD (defaults to today in tenant TZ).
+        Does not send a message.
+        """
         principal, err = require_principal(config.clients, scope="sms:read")
         if err is not None:
             return err.model_dump(mode="json")
@@ -191,12 +231,19 @@ def create_server(
 
     @mcp.tool()
     def send_sms(
-        workbook_id: str,
+        to: str,
+        message: str,
         employee_id: str,
         period: str,
-        template_id: str,
     ) -> dict[str, Any]:
-        """Send at most one automated SMS per employee/period/local day."""
+        """Send one SMS using caller-provided destination and message body.
+
+        to: destination telephone (prefer E.164, e.g. +4670...).
+        message: exact SMS body to send (composed by the calling agent).
+        employee_id + period: used only for suppression and same-day idempotency.
+        At most one send per employee/period/local day; repeats return replayed=true
+        without sending again. Provider credentials are never tool arguments.
+        """
         principal, err = require_principal(config.clients, scope="sms:send")
         if err is not None:
             return err.model_dump(mode="json")
@@ -206,10 +253,10 @@ def create_server(
             rt.session_factory,
             rt.gateway,
             principal,
-            workbook_id=workbook_id,
+            to=to,
+            message=message,
             employee_id=employee_id,
             period=period,
-            template_id=template_id,
         ).model_dump(mode="json")
 
     @mcp.tool()
@@ -218,7 +265,11 @@ def create_server(
         reason: str,
         active: bool,
     ) -> dict[str, Any]:
-        """Record or update SMS suppression (opt_out is sticky)."""
+        """Set SMS suppression for an employee.
+
+        reason: opt_out or admin. opt_out cannot be cleared with active=false.
+        Active suppression causes send_sms to fail with sms_suppressed.
+        """
         principal, err = require_principal(config.clients, scope="sms:admin")
         if err is not None:
             return err.model_dump(mode="json")
